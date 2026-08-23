@@ -3,8 +3,6 @@ const CONFIG = {
   pollInterval: 90
 };
 
-const SILENCE_MP3 = "data:audio/mpeg;base64,SUQzBAAAAAABEVRYWFgAAAAtAAADY29tbWVudABpRDIzIHYyLjMuMCBhbmQgaWQzIHYyLjQuMCB0YWdzAAAAAAAAAAAA//MkxAAKAAAABpAAAAWSAAAAASU1BTUUzLjk5LjVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
-
 let library = { news: null, news30: null, chimes: null, weather: null, hours: {}, breaking: null, ads: [], jingles: [], spaces: [], promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} };
 
 function getSpainTime() {
@@ -12,6 +10,16 @@ function getSpainTime() {
   let pts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Madrid', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(now);
   let v = {}; pts.forEach(p => v[p.type] = p.value);
   return new Date(v.year, v.month - 1, v.day, (v.hour === "24" ? 0 : v.hour), v.minute, v.second, now.getMilliseconds());
+}
+
+function fixArchiveUrl(url) {
+  if (!url) return "";
+  let cleanUrl = url.trim();
+  // Transforma enlaces de página de Archive.org a descargas directas
+  if (cleanUrl.includes('archive.org/details/')) {
+    cleanUrl = cleanUrl.replace('archive.org/details/', 'archive.org/download/');
+  }
+  return cleanUrl;
 }
 
 function addToSchedule(item) {
@@ -53,9 +61,12 @@ async function fetchSheetData() {
 
     data.forEach(row => {
       if (!row.type || String(row.type).trim() === "") return;
-      let rawSrc = String(row.src || "").trim();
+      
+      // Aplicamos el reparador de URLs de Internet Archive
+      let rawSrc = fixArchiveUrl(String(row.src || ""));
       let finalSrc = rawSrc;
 
+      // Rotación diaria si hay múltiples enlaces separados por "|"
       if (rawSrc.includes('|')) {
         let audioList = rawSrc.split('|').map(u => u.trim()).filter(u => u.length > 0);
         if (audioList.length > 0) finalSrc = audioList[dayOfYear % audioList.length];
@@ -83,6 +94,7 @@ async function fetchSheetData() {
       else if (['schedule', 'podcast', 'interview', 'sports'].includes(t)) addToSchedule(item);
       else library.filler.push(item);
     });
+    console.log("[DATA] Parrilla sincronizada desde el Excel.");
   } catch (e) { console.error("[ERROR EXCEL]", e.message); }
 }
 
@@ -93,7 +105,9 @@ function getGlobalFiller(secInDay) {
     if (library.jingles.length > 0 && idx % 2 === 0) seq.push(library.jingles[idx % library.jingles.length]);
     if (library.spaces.length > 0 && idx % 4 === 0) seq.push(library.spaces[idx % library.spaces.length]);
   });
-  if (seq.length === 0) return { src: SILENCE_MP3, title: "Radio Maitino", seekPos: 0, remaining: 10 };
+  
+  if (seq.length === 0) return { src: "", title: "Esperando contenido...", seekPos: 0, remaining: 10 };
+  
   let total = seq.reduce((a, b) => a + Math.max(1, b.dur), 0);
   let c = secInDay % (total || 1);
   for (let itm of seq) {
@@ -109,6 +123,7 @@ function getCurrentTrackInfo() {
   const d = now.getDay(), h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
   const secInDay = h * 3600 + m * 60 + s, secInHour = m * 60 + s;
 
+  // Bloque :00
   let tohSeq = [];
   if (h === 0 && library.chimes) tohSeq.push(library.chimes);
   else if (library.hours[h] || library.hours['default']) tohSeq.push(library.hours[h] || library.hours['default']);
@@ -116,18 +131,22 @@ function getCurrentTrackInfo() {
   if (library.weather) tohSeq.push(library.weather);
   let blockDur00 = tohSeq.reduce((a, b) => a + Math.max(1, b.dur), 0);
 
+  // Bloque :30
   let toh30Seq = [];
   if (library.news30) toh30Seq.push(library.news30);
   if (library.weather) toh30Seq.push(library.weather);
   let blockDur30 = toh30Seq.reduce((a, b) => a + Math.max(1, b.dur), 0);
 
+  // Programación
   let showsToday = library.schedule[d] || [];
   let activeShows = showsToday.filter(sh => secInDay >= sh.startSecs && secInDay < sh.startSecs + sh.dur);
   activeShows.sort((a, b) => (b.exactDay === a.exactDay ? (a.startSecs - b.startSecs) : (b.exactDay ? 1 : -1)));
   let scheduledShow = activeShows[0];
 
-  if (library.breaking) return { ...library.breaking, seekPos: 0, remaining: library.breaking.dur };
+  // 1. Directo Prioritario
+  if (library.breaking) return { ...library.breaking, seekPos: 0, remaining: Math.max(1, library.breaking.dur) };
   
+  // 2. Bloque de las en punto (:00)
   if (secInHour < blockDur00 && (!scheduledShow || scheduledShow.startSecs % 3600 === 0)) {
     let c = secInHour;
     for (let itm of tohSeq) {
@@ -136,6 +155,7 @@ function getCurrentTrackInfo() {
       c -= idur;
     }
   }
+  // 3. Bloque de las y media (:30)
   else if (secInHour >= 1800 && secInHour < 1800 + blockDur30 && (!scheduledShow || scheduledShow.startSecs % 3600 === 1800)) {
     let c = secInHour - 1800;
     for (let itm of toh30Seq) {
@@ -144,12 +164,14 @@ function getCurrentTrackInfo() {
       c -= idur;
     }
   }
+  // 4. Programa Específico
   else if (scheduledShow) {
     let delay = (scheduledShow.startSecs % 3600 === 0) ? blockDur00 : ((scheduledShow.startSecs % 3600 === 1800) ? blockDur30 : 0);
     let seekPos = Math.max(0, (secInDay - scheduledShow.startSecs) - delay);
     return { ...scheduledShow, seekPos, remaining: Math.max(1, scheduledShow.dur - seekPos) };
   }
 
+  // 5. Relleno automático (Filler)
   return getGlobalFiller(secInDay);
 }
 
