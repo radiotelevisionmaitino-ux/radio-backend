@@ -1,89 +1,130 @@
 const CONFIG = {
-  api: "https://script.google.com/macros/s/AKfycbzoQfFFkwSOoZlnX73FKn8lEtbcRSEe6CYXPeuZ6tZPG5OsBuXivvvGtBJhGJhPC7GU/exec",
-  pollInterval: 90
+    api: "https://script.google.com/macros/s/AKfycbzoQfFFkwSOoZlnX73FKn8lEtbcRSEe6CYXPeuZ6tZPG5OsBuXivvvGtBJhGJhPC7GU/exec",
+    pollInterval: 90
 };
 
-let library = { filler: [] };
+let library = { news: null, news30: null, chimes: null, weather: null, hours: {}, breaking: null, ads: [], jingles: [], spaces: [], promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} };
 
-// 1. Recuperamos tu reloj geocéntrico maestro del HTML
 function getSpainTime() {
-  let now = new Date();
-  let pts = new Intl.DateTimeFormat('en-US', { 
-    timeZone: 'Europe/Madrid', 
-    year: 'numeric', month: 'numeric', day: 'numeric', 
-    hour: 'numeric', minute: 'numeric', second: 'numeric', 
-    hour12: false 
-  }).formatToParts(now);
-  let v = {}; pts.forEach(p => v[p.type] = p.value);
-  return new Date(v.year, v.month - 1, v.day, (v.hour === "24" ? 0 : v.hour), v.minute, v.second, now.getMilliseconds());
+    let now = new Date();
+    let pts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Madrid', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(now);
+    let v = {}; pts.forEach(p => v[p.type] = p.value);
+    return new Date(v.year, v.month - 1, v.day, (v.hour === "24" ? 0 : v.hour), v.minute, v.second, now.getMilliseconds());
 }
 
 async function fetchSheetData() {
-  try {
-    const res = await fetch(CONFIG.api);
-    const data = await res.json();
-    let newFiller = [];
-    
-    data.forEach(row => {
-      let src = String(row.src || "").trim();
-      if (src && !src.startsWith('file:///')) {
-        newFiller.push({ 
-          src: src, 
-          title: row.title || "Emisión",
-          // ¡VITAL! Rescatamos la duración de tu Sheet para calcular la posición
-          dur: parseInt(row.duration) || 300 
+    try {
+        const res = await fetch(CONFIG.api);
+        const data = await res.json();
+        
+        // Reiniciamos librería
+        library = { news: null, news30: null, chimes: null, weather: null, hours: {}, breaking: null, ads: [], jingles: [], spaces: [], promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} };
+        
+        let now = getSpainTime();
+        let dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
+
+        data.forEach(row => {
+            if (!row.type || String(row.type).trim() === "") return;
+            let rawSrc = (row.src || "").trim();
+            let finalSrc = rawSrc;
+
+            // Rotación de URLs múltiples
+            if (rawSrc.includes('|')) {
+                let audioList = rawSrc.split('|').map(u => u.trim()).filter(u => u.length > 0);
+                if (audioList.length > 0) finalSrc = audioList[dayOfYear % audioList.length];
+            }
+
+            let item = { 
+                src: finalSrc, title: row.title || "Emisión", dur: parseInt(row.duration) || 300, 
+                type: row.type.toLowerCase().replace(/\s+/g, ''), dayRaw: row.day, hourRaw: row.hour 
+            };
+            let t = item.type;
+
+            if (t === 'news') library.news = item; 
+            else if (t === 'news30') library.news30 = item; 
+            else if (t === 'weather') library.weather = item;
+            else if (t === 'chimes') library.chimes = item;
+            else if (t === 'space' && !item.hourRaw) library.spaces.push(item);
+            else if (t === 'hour') { let m = String(item.hourRaw||"").match(/^(\d{1,2}):(\d{2})/); if(m) library.hours[parseInt(m[1], 10)] = item; else library.hours['default'] = item; } 
+            else if (['breaking', 'breakinglive', 'estudiolive', 'emergency'].includes(t)) library.breaking = item;
+            else if (t === 'jingle') library.jingles.push(item); 
+            else if (t === 'ad') library.ads.push(item);
+            else if (t === 'promo') library.promos.push(item);
+            else if (['schedule', 'podcast', 'interview', 'sports'].includes(t)) {
+                // Parseo de días y horas
+                let days = [0,1,2,3,4,5,6]; // Por defecto todos
+                if (item.dayRaw) { /* Lógica simplificada: si hay dia, extraer (asumimos que lo configuras bien en Sheets) */ }
+                let startSecs = -1; let m = String(item.hourRaw||"").trim().match(/^(\d{1,2}):(\d{2})/);
+                if (m) startSecs = parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60;
+                
+                if (startSecs !== -1) days.forEach(d => library.schedule[d].push({ ...item, startSecs }));
+            } 
+            else library.filler.push(item);
         });
-      }
+        console.log("[DATA] Parrilla sincronizada desde el Excel.");
+    } catch (e) { console.error("[ERROR API]", e.message); }
+}
+
+function getGlobalFiller(secInDay) {
+    let seq = [];
+    library.filler.forEach((f, idx) => {
+        seq.push(f);
+        if (library.jingles.length > 0 && idx % 2 === 0) seq.push(library.jingles[idx % library.jingles.length]);
+        if (library.spaces.length > 0 && idx % 4 === 0) seq.push(library.spaces[idx % library.spaces.length]);
     });
-    
-    if (newFiller.length > 0) {
-        library.filler = newFiller;
-        console.log(`[PARRILLA] Actualizada: ${library.filler.length} audios listos.`);
+    if (seq.length === 0) return null;
+    let total = seq.reduce((a, b) => a + Math.max(1, b.dur), 0);
+    let c = secInDay % (total || 1);
+    for (let itm of seq) {
+        let idur = Math.max(1, itm.dur);
+        if (c < idur) return { ...itm, seekPos: c, remaining: idur - c };
+        c -= idur;
     }
-  } catch (e) {
-    console.error("[ERROR API] No se pudo leer Google Sheets:", e.message);
-  }
+    return { ...seq[0], seekPos: 0, remaining: seq[0].dur };
 }
 
-// 2. Cálculo determinista: Igual para todo el mundo
 function getCurrentTrackInfo() {
-  if (library.filler.length === 0) {
-    return { 
-        src: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3", 
-        title: "Audio de Seguridad", 
-        seekPos: 0, 
-        remaining: 300 
-    };
-  }
+    const now = getSpainTime();
+    const d = now.getDay(), h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
+    const secInDay = h * 3600 + m * 60 + s, secInHour = m * 60 + s;
 
-  const now = getSpainTime();
-  const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
-  const secInDay = h * 3600 + m * 60 + s;
+    // Bloque 1: :00
+    let tohSeq = [];
+    if (h === 0 && library.chimes) tohSeq.push(library.chimes); else if (library.hours[h] || library.hours['default']) tohSeq.push(library.hours[h] || library.hours['default']);
+    if (library.news) tohSeq.push(library.news);
+    if (library.weather) tohSeq.push(library.weather);
+    let blockDur00 = tohSeq.reduce((a, b) => a + Math.max(1, b.dur), 0);
 
-  // Sumamos la duración total del bucle
-  let totalDuration = library.filler.reduce((a, b) => a + Math.max(1, b.dur), 0);
-  let currentSec = secInDay % (totalDuration || 1);
+    // Bloque 2: :30
+    let toh30Seq = [];
+    if (library.news30) toh30Seq.push(library.news30);
+    if (library.weather) toh30Seq.push(library.weather);
+    let blockDur30 = toh30Seq.reduce((a, b) => a + Math.max(1, b.dur), 0);
 
-  // Buscamos qué canción encaja en este segundo exacto del día
-  for (let itm of library.filler) {
-    let idur = Math.max(1, itm.dur);
-    if (currentSec < idur) {
-      return { 
-          src: itm.src,
-          title: itm.title,
-          seekPos: currentSec, // El segundo exacto por el que va la canción
-          remaining: idur - currentSec // Cuántos segundos le quedan para terminar
-      };
+    let showsToday = library.schedule[d] || [];
+    let activeShows = showsToday.filter(sh => secInDay >= sh.startSecs && secInDay < sh.startSecs + sh.dur);
+    let scheduledShow = activeShows[0];
+
+    // LA MISMA CASCADA DE DECISIONES DE TU HTML
+    if (library.breaking) {
+        return { ...library.breaking, seekPos: 0, remaining: library.breaking.dur };
+    } 
+    else if (secInHour < blockDur00 && (!scheduledShow || scheduledShow.startSecs % 3600 === 0)) {
+        let c = secInHour;
+        for (let itm of tohSeq) { let idur = Math.max(1, itm.dur); if (c < idur) return { ...itm, seekPos: c, remaining: idur - c }; c -= idur; }
     }
-    currentSec -= idur;
-  }
-  
-  return { src: library.filler[0].src, title: library.filler[0].title, seekPos: 0, remaining: library.filler[0].dur };
+    else if (secInHour >= 1800 && secInHour < 1800 + blockDur30 && (!scheduledShow || scheduledShow.startSecs % 3600 === 1800)) {
+        let c = secInHour - 1800;
+        for (let itm of toh30Seq) { let idur = Math.max(1, itm.dur); if (c < idur) return { ...itm, seekPos: c, remaining: idur - c }; c -= idur; }
+    }
+    else if (scheduledShow) {
+        let delay = (scheduledShow.startSecs % 3600 === 0) ? blockDur00 : ((scheduledShow.startSecs % 3600 === 1800) ? blockDur30 : 0);
+        let seekPos = Math.max(0, (secInDay - scheduledShow.startSecs) - delay);
+        return { ...scheduledShow, seekPos: seekPos, remaining: scheduledShow.dur - seekPos };
+    }
+    
+    return getGlobalFiller(secInDay) || { src: "silencio", title: "Emisión", seekPos: 0, remaining: 10 };
 }
 
-function initScheduleManager() {
-  fetchSheetData();
-  setInterval(fetchSheetData, CONFIG.pollInterval * 1000);
-}
-
+function initScheduleManager() { fetchSheetData(); setInterval(fetchSheetData, CONFIG.pollInterval * 1000); }
 module.exports = { initScheduleManager, getCurrentTrackInfo, getSpainTime };
