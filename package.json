@@ -1,7 +1,6 @@
 {
   "name": "radio-backend",
   "version": "1.0.0",
-  "description": "Servidor de emisión continua para Radio Maitino",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
