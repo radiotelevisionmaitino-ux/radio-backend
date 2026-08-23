@@ -1,8 +1,11 @@
 {
-  "name": "radio-backend",
+  "name": "radio-maitino-backend",
   "version": "1.0.0",
+  "description": "Servidor 24/7 Radio Maitino",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "express": "^4.19.2",
