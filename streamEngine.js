@@ -21,7 +21,6 @@ const broadcast = (chunk) => {
   clients.forEach(res => { try { res.write(chunk); } catch (err) {} });
 };
 
-// Tubería global PCM con límite de eventos desactivado para prevenir fugas de RAM
 const pcmPassThrough = new PassThrough();
 pcmPassThrough.setMaxListeners(0);
 
@@ -29,7 +28,7 @@ let currentFeeder = null;
 let trackTimeout = null;
 const failedTracks = new Set();
 
-// CODIFICADOR MASTER (Salida continua a MP3)
+// CODIFICADOR MASTER
 function startMasterEncoder() {
   ffmpeg(pcmPassThrough)
     .inputFormat('s16le')
@@ -47,7 +46,7 @@ function startMasterEncoder() {
     .on('data', broadcast);
 }
 
-// GENERADOR DE SILENCIO NATIVO (Puente de seguridad si falla una URL)
+// GENERADOR DE SILENCIO (Sintaxis nativa de FFmpeg a prueba de fallos)
 function playSilence(duration = 5) {
   if (trackTimeout) clearTimeout(trackTimeout);
   if (currentFeeder) {
@@ -59,9 +58,9 @@ function playSilence(duration = 5) {
     currentFeeder = null;
   }
 
-  currentFeeder = ffmpeg('anullsrc=r=44100:cl=stereo')
-    .inputFormat('lavfi')
-    .duration(duration)
+  currentFeeder = ffmpeg()
+    .input('anullsrc=r=44100:cl=stereo')
+    .inputOptions(['-f', 'lavfi', '-t', String(duration)])
     .audioCodec('pcm_s16le')
     .audioChannels(2)
     .audioFrequency(44100)
@@ -75,7 +74,7 @@ function playSilence(duration = 5) {
   trackTimeout = setTimeout(playNextTrack, duration * 1000);
 }
 
-// LECTOR Y REPRODUCTOR DE PISTAS DE LA PARRILLA
+// LECTOR DE PISTAS
 function playNextTrack() {
   if (trackTimeout) clearTimeout(trackTimeout);
 
@@ -90,9 +89,8 @@ function playNextTrack() {
 
   const track = getCurrentTrackInfo();
 
-  // Si la ruta está vacía o falló previamente, genera silencio sin tirar el servidor
   if (!track || !track.src || track.src.trim() === "" || failedTracks.has(track.src)) {
-    console.log(`[PUENTE DE SEGURIDAD] Pista inaccesible o vacía. Emitiendo silencio técnico...`);
+    console.log(`[PUENTE DE SEGURIDAD] Emitiendo silencio por URL inaccesible o vacía...`);
     return playSilence(5);
   }
 
@@ -120,7 +118,7 @@ function playNextTrack() {
     console.error(`[ERROR DE RED] Imposible reproducir: ${track.title}`);
     if (track.src) {
       failedTracks.add(track.src);
-      setTimeout(() => failedTracks.delete(track.src), 180000); // Reintenta tras 3 minutos
+      setTimeout(() => failedTracks.delete(track.src), 180000);
     }
     playSilence(5);
   });
