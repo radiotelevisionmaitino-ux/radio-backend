@@ -3,22 +3,45 @@ const CONFIG = {
   pollInterval: 90
 };
 
-let library = { news: null, news30: null, chimes: null, weather: null, hours: {}, breaking: null, ads: [], jingles: [], spaces: [], promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} };
+let library = { 
+  news: null, news30: null, chimes: null, weather: null, 
+  hours: {}, breaking: null, ads: [], jingles: [], spaces: [], 
+  promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} 
+};
 
 function getSpainTime() {
   let now = new Date();
-  let pts = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Madrid', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false }).formatToParts(now);
-  let v = {}; pts.forEach(p => v[p.type] = p.value);
+  let pts = new Intl.DateTimeFormat('en-US', { 
+    timeZone: 'Europe/Madrid', year: 'numeric', month: 'numeric', day: 'numeric', 
+    hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false 
+  }).formatToParts(now);
+  let v = {}; 
+  pts.forEach(p => v[p.type] = p.value);
   return new Date(v.year, v.month - 1, v.day, (v.hour === "24" ? 0 : v.hour), v.minute, v.second, now.getMilliseconds());
 }
 
+// SANEADOR Y LIMPIADOR AVANZADO DE URLS DE INTERNET ARCHIVE
 function fixArchiveUrl(url) {
   if (!url) return "";
   let cleanUrl = url.trim();
-  // Transforma enlaces de página de Archive.org a descargas directas
+  
+  // 1. Corrige hosts directos de servidores internos (ej. ia601609.us.archive.org -> archive.org)
+  cleanUrl = cleanUrl.replace(/^https?:\/\/ia\d+\.[^/]+\.archive\.org\//i, 'https://archive.org/');
+
+  // 2. Convierte enlaces de páginas web (/details/) a descargas directas de archivo (/download/)
   if (cleanUrl.includes('archive.org/details/')) {
     cleanUrl = cleanUrl.replace('archive.org/details/', 'archive.org/download/');
   }
+
+  // 3. Codifica caracteres especiales, hashtags y símbolos que corrompen las peticiones de FFmpeg
+  try {
+    cleanUrl = encodeURI(decodeURI(cleanUrl))
+      .replace(/#/g, '%23')
+      .replace(/\?/g, '%3F');
+  } catch (e) {
+    cleanUrl = cleanUrl.replace(/ /g, '%20').replace(/#/g, '%23');
+  }
+  
   return cleanUrl;
 }
 
@@ -26,15 +49,19 @@ function addToSchedule(item) {
   let days = [];
   let s1 = String(item.dayRaw || "").trim();
   let exactDay = (s1 && s1.toLowerCase() !== "null");
+  
   if (exactDay) {
     s1.split(/[,|]/).forEach(p => { 
       p = p.trim();
       if (p.includes('-')) { 
         let l = p.split('-'); 
-        for (let i = parseInt(l[0]); i <= parseInt(l[1]); i++) days.push(i); 
-      } else if (p !== "") { days.push(parseInt(p)); } 
+        for (let i = parseInt(l[0], 10); i <= parseInt(l[1], 10); i++) days.push(i); 
+      } else if (p !== "") { 
+        days.push(parseInt(p, 10)); 
+      } 
     });
   }
+  
   if (days.length === 0) days = [0, 1, 2, 3, 4, 5, 6]; 
   
   let s2 = String(item.hourRaw || "").trim();
@@ -55,27 +82,42 @@ async function fetchSheetData() {
     const data = await res.json();
     if (!Array.isArray(data)) return;
 
-    library = { news: null, news30: null, chimes: null, weather: null, hours: {}, breaking: null, ads: [], jingles: [], spaces: [], promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} };
+    library = { 
+      news: null, news30: null, chimes: null, weather: null, 
+      hours: {}, breaking: null, ads: [], jingles: [], spaces: [], 
+      promos: [], filler: [], schedule: {0:[],1:[],2:[],3:[],4:[],5:[],6:[]} 
+    };
+    
     let now = getSpainTime();
     let dayOfYear = Math.floor((now - new Date(now.getFullYear(), 0, 0)) / (1000 * 60 * 60 * 24));
 
     data.forEach(row => {
       if (!row.type || String(row.type).trim() === "") return;
       
-      // Aplicamos el reparador de URLs de Internet Archive
-      let rawSrc = fixArchiveUrl(String(row.src || ""));
-      let finalSrc = rawSrc;
+      let rawSrc = String(row.src || "").trim();
+      let finalSrc = "";
 
-      // Rotación diaria si hay múltiples enlaces separados por "|"
+      // Rotación multi-audio por día usando el separador "|"
       if (rawSrc.includes('|')) {
-        let audioList = rawSrc.split('|').map(u => u.trim()).filter(u => u.length > 0);
-        if (audioList.length > 0) finalSrc = audioList[dayOfYear % audioList.length];
+        let audioList = rawSrc.split('|')
+          .map(u => fixArchiveUrl(u))
+          .filter(u => u.length > 0);
+        if (audioList.length > 0) {
+          finalSrc = audioList[dayOfYear % audioList.length];
+        }
+      } else {
+        finalSrc = fixArchiveUrl(rawSrc);
       }
 
       let item = { 
-        src: finalSrc, title: row.title || "Emisión", dur: parseInt(row.duration) || 300, 
-        type: row.type.toLowerCase().replace(/\s+/g, ''), dayRaw: row.day, hourRaw: row.hour 
+        src: finalSrc, 
+        title: row.title || "Emisión", 
+        dur: parseInt(row.duration, 10) || 300, 
+        type: row.type.toLowerCase().replace(/\s+/g, ''), 
+        dayRaw: row.day, 
+        hourRaw: row.hour 
       };
+      
       let t = item.type;
 
       if (t === 'news') library.news = item; 
@@ -85,7 +127,8 @@ async function fetchSheetData() {
       else if (t === 'space' && !item.hourRaw) library.spaces.push(item);
       else if (t === 'hour') {
         let m = String(item.hourRaw || "").match(/^(\d{1,2}):(\d{2})/);
-        if (m) library.hours[parseInt(m[1], 10)] = item; else library.hours['default'] = item;
+        if (m) library.hours[parseInt(m[1], 10)] = item; 
+        else library.hours['default'] = item;
       } 
       else if (['breaking', 'breakinglive', 'estudiolive', 'emergency'].includes(t)) library.breaking = item;
       else if (t === 'jingle') library.jingles.push(item); 
@@ -94,8 +137,11 @@ async function fetchSheetData() {
       else if (['schedule', 'podcast', 'interview', 'sports'].includes(t)) addToSchedule(item);
       else library.filler.push(item);
     });
-    console.log("[DATA] Parrilla sincronizada desde el Excel.");
-  } catch (e) { console.error("[ERROR EXCEL]", e.message); }
+
+    console.log("[DATA] Parrilla actualizada y saneada correctamente.");
+  } catch (e) { 
+    console.error("[ERROR EXCEL]", e.message); 
+  }
 }
 
 function getGlobalFiller(secInDay) {
@@ -143,7 +189,7 @@ function getCurrentTrackInfo() {
   activeShows.sort((a, b) => (b.exactDay === a.exactDay ? (a.startSecs - b.startSecs) : (b.exactDay ? 1 : -1)));
   let scheduledShow = activeShows[0];
 
-  // 1. Directo Prioritario
+  // 1. Directo de Emergencia
   if (library.breaking) return { ...library.breaking, seekPos: 0, remaining: Math.max(1, library.breaking.dur) };
   
   // 2. Bloque de las en punto (:00)
