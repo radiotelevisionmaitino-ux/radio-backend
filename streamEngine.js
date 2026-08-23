@@ -11,7 +11,9 @@ const addClient = (res) => {
   clients.push(res);
 };
 
-const removeClient = (res) => { clients = clients.filter(c => c !== res); };
+const removeClient = (res) => {
+  clients = clients.filter(c => c !== res);
+};
 
 const broadcast = (chunk) => {
   burstBuffer.push(chunk);
@@ -19,19 +21,21 @@ const broadcast = (chunk) => {
   clients.forEach(res => { try { res.write(chunk); } catch (err) {} });
 };
 
+// Tubería global PCM con límite de eventos desactivado para prevenir fugas de RAM
 const pcmPassThrough = new PassThrough();
-pcmPassThrough.setMaxListeners(0); // Evita fugas de memoria
+pcmPassThrough.setMaxListeners(0);
 
 let currentFeeder = null;
 let trackTimeout = null;
 const failedTracks = new Set();
 
+// CODIFICADOR MASTER (Salida continua a MP3)
 function startMasterEncoder() {
   ffmpeg(pcmPassThrough)
     .inputFormat('s16le')
     .inputOptions(['-ar 44100', '-ac 2'])
     .audioCodec('libmp3lame')
-    .audioBitrate(128) // Subido a 128kbps para mejor calidad
+    .audioBitrate(128)
     .audioChannels(2)
     .audioFrequency(44100)
     .format('mp3')
@@ -43,28 +47,38 @@ function startMasterEncoder() {
     .on('data', broadcast);
 }
 
+// GENERADOR DE SILENCIO NATIVO (Puente de seguridad si falla una URL)
 function playSilence(duration = 5) {
   if (trackTimeout) clearTimeout(trackTimeout);
   if (currentFeeder) {
-    try { currentFeeder.unpipe(pcmPassThrough); currentFeeder.kill('SIGKILL'); } catch (e) {}
+    try {
+      currentFeeder.unpipe(pcmPassThrough);
+      currentFeeder.removeAllListeners();
+      currentFeeder.kill('SIGKILL');
+    } catch (e) {}
+    currentFeeder = null;
   }
 
-  // Generador de silencio a prueba de fallos
   currentFeeder = ffmpeg('anullsrc=r=44100:cl=stereo')
     .inputFormat('lavfi')
-    .t(duration)
+    .duration(duration)
     .audioCodec('pcm_s16le')
     .audioChannels(2)
     .audioFrequency(44100)
     .format('s16le');
 
-  currentFeeder.on('error', () => { trackTimeout = setTimeout(playNextTrack, 2000); });
+  currentFeeder.on('error', () => {
+    trackTimeout = setTimeout(playNextTrack, 2000);
+  });
+
   currentFeeder.pipe(pcmPassThrough, { end: false });
   trackTimeout = setTimeout(playNextTrack, duration * 1000);
 }
 
+// LECTOR Y REPRODUCTOR DE PISTAS DE LA PARRILLA
 function playNextTrack() {
   if (trackTimeout) clearTimeout(trackTimeout);
+
   if (currentFeeder) {
     try {
       currentFeeder.unpipe(pcmPassThrough);
@@ -76,8 +90,9 @@ function playNextTrack() {
 
   const track = getCurrentTrackInfo();
 
+  // Si la ruta está vacía o falló previamente, genera silencio sin tirar el servidor
   if (!track || !track.src || track.src.trim() === "" || failedTracks.has(track.src)) {
-    console.log(`[SALTO] Enlace no válido o en lista negra. Generando puente de silencio...`);
+    console.log(`[PUENTE DE SEGURIDAD] Pista inaccesible o vacía. Emitiendo silencio técnico...`);
     return playSilence(5);
   }
 
@@ -89,7 +104,7 @@ function playNextTrack() {
       '-reconnect 1',
       '-reconnect_streamed 1',
       '-reconnect_delay_max 5',
-      '-analyzeduration 5000000', // Aumentado para audios pesados de Archive.org
+      '-analyzeduration 5000000',
       '-probesize 5000000'
     ])
     .audioCodec('pcm_s16le')
@@ -102,9 +117,11 @@ function playNextTrack() {
   }
 
   currentFeeder.on('error', (err) => {
-    console.error(`[ERROR DE RED] No se pudo leer: ${track.title}`);
-    failedTracks.add(track.src);
-    setTimeout(() => failedTracks.delete(track.src), 180000); // Lo perdona a los 3 minutos
+    console.error(`[ERROR DE RED] Imposible reproducir: ${track.title}`);
+    if (track.src) {
+      failedTracks.add(track.src);
+      setTimeout(() => failedTracks.delete(track.src), 180000); // Reintenta tras 3 minutos
+    }
     playSilence(5);
   });
 
@@ -117,7 +134,7 @@ function playNextTrack() {
 
 function startEngine() {
   startMasterEncoder();
-  setTimeout(playNextTrack, 2000); // Espera 2s para que el cerebro se sincronice
+  setTimeout(playNextTrack, 2000);
 }
 
 module.exports = { startEngine, addClient, removeClient };
