@@ -1,54 +1,38 @@
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-ffmpeg.setFfmpegPath(ffmpegPath);
-
+ffmpeg.setFfmpegPath(require('@ffmpeg-installer/ffmpeg').path);
 const { getNextTrackToPlay } = require('./scheduleManager');
 
 let clients = [];
-
-function addClient(res) {
-  clients.push(res);
-}
-
-function removeClient(res) {
-  clients = clients.filter(client => client !== res);
-}
-
-function broadcastData(chunk) {
-  clients.forEach(client => client.write(chunk));
-}
+const addClient = (res) => clients.push(res);
+const removeClient = (res) => clients = clients.filter(c => c !== res);
+const broadcast = (chunk) => clients.forEach(c => c.write(chunk));
 
 function processNextAudio() {
   const track = getNextTrackToPlay();
-  console.log(`[AL AIRE] Sonando: ${track.title} - ${track.src}`);
+  console.log(`[AL AIRE] ${track.title} | ${track.src}`);
 
-  // FFmpeg procesa el archivo fuente al vuelo
   const command = ffmpeg(track.src)
+    .inputOptions([
+      '-re', // CRÍTICO: Lee en tiempo real para no ahogar la RAM con .webm
+      '-reconnect 1', 
+      '-reconnect_streamed 1', 
+      '-reconnect_delay_max 5'
+    ])
     .audioCodec('libmp3lame')
-    .audioBitrate(128)
+    .audioBitrate(96) // Más ligero para servidores gratuitos
     .audioChannels(2)
     .audioFrequency(44100)
     .format('mp3')
     .on('error', (err) => {
-      console.error('Error FFmpeg (Saltando pista):', err.message);
-      // Si un enlace MP3 está roto, espera 2 segundos y salta al siguiente
+      console.error('Error FFmpeg (Saltando):', err.message);
       setTimeout(processNextAudio, 2000);
     })
-    .on('end', () => {
-      // Cuando termina la canción, arranca la siguiente en bucle infinito
-      processNextAudio();
-    });
+    .on('end', () => processNextAudio());
 
-  const stream = command.pipe();
-  
-  stream.on('data', (chunk) => {
-    broadcastData(chunk);
-  });
+  command.pipe().on('data', broadcast);
 }
 
 function startEngine() {
-  console.log("Motor FFmpeg inicializado. Comenzando flujo...");
-  // Damos 3 segundos de margen para que la primera llamada a Google Sheets termine
   setTimeout(processNextAudio, 3000);
 }
 
